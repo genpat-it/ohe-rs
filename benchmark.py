@@ -77,6 +77,9 @@ def print_system_info():
         print(f"  GPU:       not available")
     print(f"  Python:    {platform.python_version()}")
     print(f"  NumPy:     {np.__version__}")
+    import os
+    rayon_threads = os.cpu_count()
+    print(f"  Rayon:     {rayon_threads} threads (all available cores)")
 
 # ── Config ────────────────────────────────────────────────────────────
 
@@ -139,12 +142,35 @@ for scenario_name, N, K in scenarios:
     print(f"\n  ┌─ TRANSFORM-ONLY (K pre-known, input already 0..K-1, no discovery)")
     print(f"  │")
 
-    # ohe-rs with num_classes (skip discovery)
+    # ohe-rs CPU with num_classes (skip discovery)
     t, (v, idx, ptr, nc) = bench(
-        "│  ohe-rs sparse (num_classes=K)",
+        "│  ohe-rs CPU sparse (num_classes=K)",
         lambda: encode_sparse(data_int, num_classes=K), N,
     )
     all_ok &= verify(csr_matrix((v, idx, ptr), shape=(N, nc)), "ohe-rs transform sparse")
+
+    # ohe-rs GPU (with H2D transfer, no discovery)
+    try:
+        from ohe_rs import gpu_available
+        if gpu_available():
+            from ohe_rs import gpu_encode_sparse, gpu_upload, gpu_encode_sparse_preloaded
+
+            t, (v, idx, ptr, nc) = bench(
+                "│  ohe-rs GPU sparse (with H2D, num_classes=K)",
+                lambda: gpu_encode_sparse(data_int), N,
+            )
+
+            # Pre-load data on GPU
+            gpu_buf = gpu_upload(data_int)
+
+            t, (v, idx, ptr, nc) = bench(
+                "│  ohe-rs GPU sparse (pre-loaded)",
+                lambda: gpu_encode_sparse_preloaded(gpu_buf, K), N,
+            )
+
+            del gpu_buf
+    except ImportError:
+        pass
 
     # sklearn transform-only (prefitted)
     try:

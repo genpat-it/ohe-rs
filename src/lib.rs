@@ -465,6 +465,66 @@ fn gpu_encode_sparse_py<'py>(
     ))
 }
 
+/// GPU buffer: data pre-loaded on device for kernel-only encoding.
+#[cfg(feature = "cuda")]
+#[pyclass]
+struct GpuBufferPy {
+    inner: gpu::GpuBuffer,
+    n: usize,
+}
+
+#[cfg(feature = "cuda")]
+#[pymethods]
+impl GpuBufferPy {
+    /// Number of elements in the buffer.
+    #[getter]
+    fn len(&self) -> usize {
+        self.n
+    }
+}
+
+/// Upload data to GPU, returning a GpuBuffer for kernel-only encoding.
+#[cfg(feature = "cuda")]
+#[pyfunction]
+fn gpu_upload(input: PyReadonlyArray1<'_, i64>) -> PyResult<GpuBufferPy> {
+    let data = input.as_slice()?;
+    let encoder = get_gpu_encoder()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let buf = encoder.upload(data)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("GPU upload: {e}")))?;
+    let n = data.len();
+    Ok(GpuBufferPy { inner: buf, n })
+}
+
+/// Sparse encode from pre-loaded GPU buffer (kernel-only, no H2D transfer).
+#[cfg(feature = "cuda")]
+#[pyfunction]
+fn gpu_encode_sparse_preloaded_py<'py>(
+    py: Python<'py>,
+    buffer: &GpuBufferPy,
+    num_classes: usize,
+) -> PyResult<(
+    Bound<'py, PyArray1<u8>>,
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i64>>,
+    usize,
+)> {
+    let encoder = get_gpu_encoder()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    let (indices, indptr) = encoder
+        .encode_sparse_from_buffer(&buffer.inner)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("CUDA kernel: {e}")))?;
+
+    let values = vec![1u8; buffer.n];
+
+    Ok((
+        Array1::from_vec(values).into_pyarray_bound(py),
+        Array1::from_vec(indices).into_pyarray_bound(py),
+        Array1::from_vec(indptr).into_pyarray_bound(py),
+        num_classes,
+    ))
+}
+
 #[cfg(feature = "cuda")]
 #[pyfunction]
 fn gpu_available() -> bool {
@@ -490,6 +550,9 @@ fn ohe_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(gpu_encode_dense_py, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_encode_sparse_py, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_upload, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_encode_sparse_preloaded_py, m)?)?;
+        m.add_class::<GpuBufferPy>()?;
     }
 
     Ok(())
