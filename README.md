@@ -48,8 +48,8 @@ Every combination of H2D (host-to-device) and D2H (device-to-host) transfer benc
 
 | Method | K=10 | K=1,000 | K=100,000 |
 |---|---|---|---|
-| **ohe-rs GPU** | **48 ms** | **44 ms** | **75 ms** |
-| PyTorch GPU | 75 ms | 73 ms | 73 ms |
+| **ohe-rs GPU** | **48 ms** | **44 ms** | 75 ms |
+| PyTorch GPU | 75 ms | 73 ms | **73 ms** |
 
 **GPU pre-loaded input, D2H output (kernel + D2H):**
 
@@ -65,7 +65,7 @@ Every combination of H2D (host-to-device) and D2H (device-to-host) transfer benc
 | **ohe-rs GPU** | **1.3 ms** | **1.4 ms** | **1.4 ms** |
 | PyTorch GPU | 1.5 ms | 1.5 ms | 1.5 ms |
 
-> **ohe-rs wins every single category** — CPU, GPU with transfers, GPU pre-loaded, and GPU kernel-only.
+> **ohe-rs wins in nearly every scenario.** At K=100K with full H2D+D2H, PyTorch edges ahead (73ms vs 75ms) due to lower transfer overhead for COO metadata vs CSR arrays.
 
 > **PyTorch `F.one_hot` limitation:** allocates a dense **int64** tensor (8 bytes/element) before casting. At K=1,000 with 10M rows this requires **80 GB of RAM**. ohe-rs sparse uses ~13 bytes/row regardless of K.
 
