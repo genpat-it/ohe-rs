@@ -76,6 +76,8 @@ One-hot encoding is **memory-bandwidth bound**, not compute-bound. More threads 
 | Threads | E2E K=10 | E2E K=100K | Transform K=10 |
 |---|---|---|---|
 | 1 | 58 ms | 273 ms | 24 ms |
+| 2 | 38 ms | 148 ms | 20 ms |
+| 4 | 30 ms | 101 ms | 22 ms |
 | 8 | **20 ms** | 70 ms | **16 ms** |
 | 16 | 20 ms | **62 ms** | 16 ms |
 | 32 | 20 ms | 55 ms | 20 ms |
