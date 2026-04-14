@@ -207,6 +207,16 @@ matrix = csr_matrix((values, indices, indptr), shape=(10_000, total_cols))
 | ohe-rs per-column Python loop | 2,491 ms | 3.5x |
 | sklearn per-column | 8,618 ms | baseline |
 
+**Memory usage:**
+
+| | Size |
+|---|---|
+| Input matrix (int64) | 640 MB |
+| Sparse output (CSR) | **400 MB** |
+| Dense equivalent (uint8) | 21.8 GB |
+
+Sparse uses **1.8%** of the memory that dense would require. The output matrix has shape (10,000 x 2,178,687) with 80M non-zeros — each row has exactly 8,000 ones (one per locus).
+
 ### Memory estimation
 
 ```python
