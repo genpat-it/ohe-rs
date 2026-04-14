@@ -240,10 +240,15 @@ pub fn encode_dense_pub(data: &[i64]) -> Array2<u8> {
 
 /// One-hot encode an integer array to sparse CSR.
 /// Returns (data, indices, indptr, n_categories).
+///
+/// If `num_classes` is provided, category discovery is skipped and input
+/// values are used directly as column indices (must be in 0..num_classes-1).
 #[pyfunction]
+#[pyo3(signature = (input, num_classes=None))]
 fn encode_sparse_py<'py>(
     py: Python<'py>,
     input: PyReadonlyArray1<'py, i64>,
+    num_classes: Option<usize>,
 ) -> PyResult<(
     Bound<'py, PyArray1<u8>>,
     Bound<'py, PyArray1<i32>>,
@@ -251,9 +256,30 @@ fn encode_sparse_py<'py>(
     usize,
 )> {
     let data = input.as_slice()?;
-    let cat_map = discover_categories_parallel(data);
-    let n_cats = cat_map.len();
-    let (values, indices, indptr) = encode_sparse(data, &cat_map);
+    let n = data.len();
+
+    let (indices, n_cats) = match num_classes {
+        Some(k) => {
+            // Skip category discovery: input values ARE the column indices
+            let indices: Vec<i32> = data
+                .par_iter()
+                .map(|&val| val as i32)
+                .collect();
+            (indices, k)
+        }
+        None => {
+            let cat_map = discover_categories_parallel(data);
+            let n_cats = cat_map.len();
+            let indices: Vec<i32> = data
+                .par_iter()
+                .map(|&val| cat_map.get(&val).unwrap() as i32)
+                .collect();
+            (indices, n_cats)
+        }
+    };
+
+    let indptr: Vec<i64> = (0..=(n as i64)).collect();
+    let values = vec![1u8; n];
 
     Ok((
         Array1::from_vec(values).into_pyarray_bound(py),
@@ -264,21 +290,50 @@ fn encode_sparse_py<'py>(
 }
 
 /// One-hot encode an integer array to dense matrix.
-/// Optional max_memory_mb limits peak memory (default: no limit).
+///
+/// If `num_classes` is provided, category discovery is skipped.
+/// Optional `max_memory_mb` limits peak memory.
 #[pyfunction]
-#[pyo3(signature = (input, max_memory_mb=None))]
+#[pyo3(signature = (input, num_classes=None, max_memory_mb=None))]
 fn encode_dense_py<'py>(
     py: Python<'py>,
     input: PyReadonlyArray1<'py, i64>,
+    num_classes: Option<usize>,
     max_memory_mb: Option<usize>,
 ) -> PyResult<Bound<'py, PyArray2<u8>>> {
     let data = input.as_slice()?;
-    let cat_map = discover_categories_parallel(data);
+    let n = data.len();
 
-    let matrix = match max_memory_mb {
-        Some(mb) => encode_dense_chunked(data, &cat_map, mb * 1024 * 1024),
+    let (codes, k) = match num_classes {
+        Some(k) => {
+            // Direct: input values are already 0..K-1
+            (None, k)
+        }
         None => {
-            let required = estimate_dense_memory(data.len(), cat_map.len());
+            let cat_map = discover_categories_parallel(data);
+            let k = cat_map.len();
+            let mapped: Vec<i64> = data
+                .par_iter()
+                .map(|&val| cat_map.get(&val).unwrap() as i64)
+                .collect();
+            (Some(mapped), k)
+        }
+    };
+
+    let effective_data = codes.as_deref().unwrap_or(data);
+
+    let required = estimate_dense_memory(n, k);
+    match max_memory_mb {
+        Some(mb) => {
+            // Build a temporary CategoryMap for chunked path (identity mapping)
+            let mut cat_map = CategoryMap::new();
+            for i in 0..k as i64 {
+                cat_map.insert(i);
+            }
+            let matrix = encode_dense_chunked(effective_data, &cat_map, mb * 1024 * 1024);
+            Ok(matrix.into_pyarray_bound(py))
+        }
+        None => {
             if required > 8 * 1024 * 1024 * 1024 {
                 return Err(pyo3::exceptions::PyMemoryError::new_err(format!(
                     "Dense encoding would require {:.1} GB. Use encode_sparse() \
@@ -286,10 +341,14 @@ fn encode_dense_py<'py>(
                     required as f64 / 1e9
                 )));
             }
-            encode_dense(data, &cat_map)
+            let mut cat_map = CategoryMap::new();
+            for i in 0..k as i64 {
+                cat_map.insert(i);
+            }
+            let matrix = encode_dense(effective_data, &cat_map);
+            Ok(matrix.into_pyarray_bound(py))
         }
-    };
-    Ok(matrix.into_pyarray_bound(py))
+    }
 }
 
 /// Estimate memory usage in bytes for encoding.
