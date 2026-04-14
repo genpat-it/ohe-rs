@@ -57,19 +57,19 @@ maturin develop --release
 CUDA_ROOT=/usr/local/cuda maturin develop --release
 ```
 
-### Docker
+### Docker (ghcr.io)
 
-```dockerfile
-FROM rust:1.80 AS builder
-RUN pip install maturin
-COPY . /ohe-rs
-WORKDIR /ohe-rs
-RUN maturin build --release
+```bash
+# CPU-only
+docker pull ghcr.io/genpat-it/ohe-rs:latest
+docker run --rm ghcr.io/genpat-it/ohe-rs -c "from ohe_rs import encode_sparse; print('OK')"
 
-FROM python:3.12-slim
-COPY --from=builder /ohe-rs/target/wheels/*.whl /tmp/
-RUN pip install /tmp/*.whl numpy scipy
+# With CUDA support
+docker pull ghcr.io/genpat-it/ohe-rs:latest-cuda
+docker run --rm --gpus all ghcr.io/genpat-it/ohe-rs:latest-cuda -c "from ohe_rs import gpu_available; print('GPU:', gpu_available())"
 ```
+
+Images are automatically built and pushed on each release.
 
 ### Bioconda
 
