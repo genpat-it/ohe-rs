@@ -179,6 +179,34 @@ values, indices, indptr, categories, n_cats = encode_strings_sparse(strings)
 print(categories)  # ['cat', 'dog', 'bird']
 ```
 
+### Multi-column encoding (cgMLST / allele profiles)
+
+For datasets with many categorical columns (e.g. cgMLST allele profiles), `encode_multi_sparse` encodes all columns in a single Rust call, avoiding Python loop overhead.
+
+```python
+import numpy as np
+from scipy.sparse import csr_matrix
+from ohe_rs import encode_multi_sparse
+
+# cgMLST-like matrix: 10K samples x 8K loci, each cell is an allele ID
+profiles = np.random.randint(0, 300, size=(10_000, 8_000), dtype=np.int64)
+
+# Single call — encodes all columns in parallel
+values, indices, indptr, total_cols, per_col_sizes = encode_multi_sparse(profiles)
+
+# Build scipy sparse matrix (rows=samples, cols=concatenated one-hot of all loci)
+matrix = csr_matrix((values, indices, indptr), shape=(10_000, total_cols))
+# matrix.shape = (10000, ~2.4M)  — each row has exactly 8000 non-zeros
+```
+
+**Performance (10K samples x 8K loci, ~50-500 alleles per locus):**
+
+| Method | Time | Speedup |
+|---|---|---|
+| **ohe-rs encode_multi_sparse** | **724 ms** | **12x** |
+| ohe-rs per-column Python loop | 2,491 ms | 3.5x |
+| sklearn per-column | 8,618 ms | baseline |
+
 ### Memory estimation
 
 ```python
