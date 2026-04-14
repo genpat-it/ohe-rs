@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ohe-rs"
+version = "0.1.0"
+description = "Ultra-fast one-hot encoding powered by Rust"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.20", "scipy>=1.7"]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "cuda"]
+python-source = "python"
+module-name = "ohe_rs.ohe_rs"
