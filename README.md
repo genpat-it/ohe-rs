@@ -4,6 +4,9 @@
 [![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-Optional-green.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![Bioconda](https://img.shields.io/conda/vn/bioconda/ohe-rs.svg)](https://bioconda.github.io/recipes/ohe-rs/README.html)
+[![Docker](https://img.shields.io/badge/Docker-ghcr.io-blue.svg)](https://github.com/genpat-it/ohe-rs/pkgs/container/ohe-rs)
+[![GitHub Release](https://img.shields.io/github/v/release/genpat-it/ohe-rs)](https://github.com/genpat-it/ohe-rs/releases)
 
 Ultra-fast one-hot encoding powered by Rust + CUDA, with Python bindings.
 
