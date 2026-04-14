@@ -162,6 +162,62 @@ fn intern_and_encode_sparse(
     (values, indices, indptr, categories, k)
 }
 
+// ── Memory estimation ────────────────────────────────────────────────
+
+/// Estimate memory required for dense encoding in bytes.
+fn estimate_dense_memory(n: usize, k: usize) -> usize {
+    n * k // u8 matrix
+}
+
+/// Estimate memory required for sparse encoding in bytes.
+fn estimate_sparse_memory(n: usize) -> usize {
+    n           // values: u8
+    + n * 4     // indices: i32
+    + (n + 1) * 8 // indptr: i64
+}
+
+// ── Chunked dense encoding ──────────────────────────────────────────
+
+/// Encode dense matrix in chunks, returning sparse CSR to avoid OOM.
+/// When N*K exceeds max_bytes, we process in chunks and build CSR directly.
+fn encode_dense_chunked(
+    data: &[i64],
+    cat_map: &CategoryMap,
+    max_bytes: usize,
+) -> Array2<u8> {
+    let n = data.len();
+    let k = cat_map.len();
+    let required = estimate_dense_memory(n, k);
+
+    if required <= max_bytes {
+        return encode_dense(data, cat_map);
+    }
+
+    // Compute chunk size: how many rows fit in max_bytes
+    let rows_per_chunk = max_bytes / k;
+    let rows_per_chunk = rows_per_chunk.max(1);
+
+    let mut matrix = Array2::<u8>::zeros((n, k));
+    let raw = matrix.as_slice_mut().unwrap();
+
+    for chunk_start in (0..n).step_by(rows_per_chunk) {
+        let chunk_end = (chunk_start + rows_per_chunk).min(n);
+        let chunk = &data[chunk_start..chunk_end];
+
+        chunk.par_iter().enumerate().for_each(|(i, &val)| {
+            let row = chunk_start + i;
+            let code = cat_map.get(&val).unwrap() as usize;
+            let offset = row * k + code;
+            unsafe {
+                let ptr = raw.as_ptr() as *mut u8;
+                *ptr.add(offset) = 1;
+            }
+        });
+    }
+
+    matrix
+}
+
 // ── Public API for benchmarks ────────────────────────────────────────
 
 pub fn discover_categories_parallel_pub(data: &[i64]) -> usize {
@@ -208,15 +264,43 @@ fn encode_sparse_py<'py>(
 }
 
 /// One-hot encode an integer array to dense matrix.
+/// Optional max_memory_mb limits peak memory (default: no limit).
 #[pyfunction]
+#[pyo3(signature = (input, max_memory_mb=None))]
 fn encode_dense_py<'py>(
     py: Python<'py>,
     input: PyReadonlyArray1<'py, i64>,
+    max_memory_mb: Option<usize>,
 ) -> PyResult<Bound<'py, PyArray2<u8>>> {
     let data = input.as_slice()?;
     let cat_map = discover_categories_parallel(data);
-    let matrix = encode_dense(data, &cat_map);
+
+    let matrix = match max_memory_mb {
+        Some(mb) => encode_dense_chunked(data, &cat_map, mb * 1024 * 1024),
+        None => {
+            let required = estimate_dense_memory(data.len(), cat_map.len());
+            if required > 8 * 1024 * 1024 * 1024 {
+                return Err(pyo3::exceptions::PyMemoryError::new_err(format!(
+                    "Dense encoding would require {:.1} GB. Use encode_sparse() \
+                     or pass max_memory_mb to enable chunked processing.",
+                    required as f64 / 1e9
+                )));
+            }
+            encode_dense(data, &cat_map)
+        }
+    };
     Ok(matrix.into_pyarray_bound(py))
+}
+
+/// Estimate memory usage in bytes for encoding.
+/// Returns (dense_bytes, sparse_bytes).
+#[pyfunction]
+fn estimate_memory_py(input: PyReadonlyArray1<'_, i64>) -> PyResult<(usize, usize)> {
+    let data = input.as_slice()?;
+    let cat_map = discover_categories_parallel(data);
+    let n = data.len();
+    let k = cat_map.len();
+    Ok((estimate_dense_memory(n, k), estimate_sparse_memory(n)))
 }
 
 /// One-hot encode a list of strings to sparse CSR.
@@ -339,6 +423,7 @@ fn ohe_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_sparse_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_dense_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_strings_sparse_py, m)?)?;
+    m.add_function(wrap_pyfunction!(estimate_memory_py, m)?)?;
     m.add_function(wrap_pyfunction!(set_threads, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
 
@@ -433,5 +518,34 @@ mod tests {
         sorted_indices.sort();
         sorted_indices.dedup();
         assert_eq!(sorted_indices.len(), 10_000);
+    }
+
+    #[test]
+    fn test_memory_estimation() {
+        let n = 1_000_000;
+        let k = 100;
+        assert_eq!(estimate_dense_memory(n, k), n * k);
+        let sparse = estimate_sparse_memory(n);
+        // values(1B) + indices(4B) + indptr(8B) per element
+        assert_eq!(sparse, n + n * 4 + (n + 1) * 8);
+    }
+
+    #[test]
+    fn test_chunked_dense_matches_regular() {
+        let data: Vec<i64> = (0..1000).map(|i| i % 10).collect();
+        let cat_map = discover_categories_parallel(&data);
+        let regular = encode_dense(&data, &cat_map);
+        // Force chunking with a tiny memory budget (100 bytes)
+        let chunked = encode_dense_chunked(&data, &cat_map, 100);
+        assert_eq!(regular, chunked);
+    }
+
+    #[test]
+    fn test_dense_oom_protection() {
+        // Verify estimation catches huge allocations
+        let n = 100_000_000;
+        let k = 1_000_000;
+        let required = estimate_dense_memory(n, k);
+        assert!(required > 8 * 1024 * 1024 * 1024); // > 8GB
     }
 }

@@ -13,7 +13,10 @@ Usage:
     # Integer input -> dense numpy array
     dense = encode_dense(data)  # shape (5, 3), dtype uint8
 
-    # GPU-accelerated dense encoding
+    # Memory estimation before encoding
+    dense_bytes, sparse_bytes = estimate_memory(data)
+
+    # GPU-accelerated encoding (if CUDA available)
     if gpu_available():
         dense_gpu = gpu_encode_dense(data)
         values, indices, indptr, n_cats = gpu_encode_sparse(data)
@@ -23,6 +26,7 @@ from .ohe_rs import (
     encode_sparse_py as encode_sparse,
     encode_dense_py as encode_dense,
     encode_strings_sparse_py as encode_strings_sparse,
+    estimate_memory_py as estimate_memory,
     set_threads,
     gpu_available,
 )
@@ -31,6 +35,7 @@ __all__ = [
     "encode_sparse",
     "encode_dense",
     "encode_strings_sparse",
+    "estimate_memory",
     "set_threads",
     "gpu_available",
 ]
