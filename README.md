@@ -32,13 +32,19 @@ Fair protocol: warm-up run excluded, GC disabled, 7 repeats (median), fit+transf
 | K = 1,000 | **28 ms** (357 M rows/s) | 65 ms | 825 ms | **29x** |
 | K = 100,000 | **58 ms** (172 M rows/s) | 84 ms | 1,338 ms | **23x** |
 
-### Dense Encoding
+### Dense Encoding (K=10)
 
-| Cardinality (K) | ohe-rs CPU | numpy eye | Speedup |
-|---|---|---|---|
-| K = 10 | **19 ms** (537 M rows/s) | 97 ms | **5x** |
+| Method | Time | Notes |
+|---|---|---|
+| PyTorch GPU (data pre-loaded) | 11 ms | Requires data already on GPU |
+| **ohe-rs CPU dense** | **19 ms** | **No GPU required** |
+| PyTorch GPU (with H2D transfer) | 21 ms | Includes host-to-device copy |
+| PyTorch CPU | 82 ms | |
+| numpy eye indexing | 97 ms | |
 
-> **Note:** GPU sparse is ~2x slower than CPU due to host-device transfer overhead. GPU shines when data is already on the device or in end-to-end GPU pipelines.
+> **PyTorch limitation:** `F.one_hot` allocates a dense **int64** tensor (8 bytes/element) before casting to uint8. At K=1,000 with 10M rows this requires **80 GB of RAM**, making it unusable for any real cardinality. ohe-rs sparse uses ~13 bytes/row regardless of K.
+
+> **GPU note:** GPU sparse is ~2x slower than CPU due to host-device transfer overhead. GPU shines when data is already on the device or in end-to-end GPU pipelines.
 
 ## Installation
 
