@@ -226,15 +226,3 @@ python benchmark.py
 
 MIT
 
-## Citation
-
-If you use ohe-rs in your research, please cite:
-
-```bibtex
-@software{deruvo2026ohers,
-  author = {de Ruvo, Andrea},
-  title = {ohe-rs: Ultra-fast one-hot encoding},
-  year = {2026},
-  url = {https://github.com/genpat-it/ohe-rs}
-}
-```
