@@ -56,6 +56,39 @@ def verify(matrix, label):
         ok = False
     return ok
 
+# ── System info ──────────────────────────────────────────────────────
+
+def print_system_info():
+    import platform, subprocess
+    print(f"  Platform:  {platform.system()} {platform.release()}")
+    try:
+        cpu = subprocess.check_output(
+            ["lscpu"], text=True
+        )
+        for line in cpu.splitlines():
+            if line.startswith("Model name:"):
+                print(f"  CPU:       {line.split(':',1)[1].strip()}")
+            if line.startswith("CPU(s):"):
+                print(f"  CPU cores: {line.split(':',1)[1].strip()}")
+    except Exception:
+        pass
+    try:
+        mem = subprocess.check_output(["free", "-h"], text=True).splitlines()[1]
+        total = mem.split()[1]
+        print(f"  RAM:       {total}")
+    except Exception:
+        pass
+    try:
+        gpu = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            text=True
+        ).strip()
+        print(f"  GPU:       {gpu}")
+    except Exception:
+        print(f"  GPU:       not available")
+    print(f"  Python:    {platform.python_version()}")
+    print(f"  NumPy:     {np.__version__}")
+
 # ── Config ────────────────────────────────────────────────────────────
 
 scenarios = [
@@ -68,6 +101,8 @@ print("=" * 78)
 print("  FAIR BENCHMARK: one-hot encoding")
 print(f"  Repeats: {REPEATS}, metric: median, warm-up: 1 run excluded")
 print(f"  Output dtype: uint8, GC disabled during timing")
+print()
+print_system_info()
 print("=" * 78)
 
 for scenario_name, N, K in scenarios:
@@ -206,6 +241,27 @@ for scenario_name, N, K in scenarios:
                 torch.cuda.empty_cache()
             else:
                 print(f"  {'F.one_hot GPU':45s}  SKIPPED (would need {dense_torch_bytes/1e9:.0f} GB on device)")
+
+        # Sparse COO construction (manual — F.one_hot doesn't support sparse)
+        def torch_sparse_cpu():
+            row_idx = torch.arange(N, dtype=torch.long)
+            indices = torch.stack([row_idx, t_cpu])
+            values = torch.ones(N, dtype=torch.uint8)
+            return torch.sparse_coo_tensor(indices, values, (N, K))
+
+        t, m = bench("sparse COO manual CPU (K pre-known)", torch_sparse_cpu)
+
+        if torch.cuda.is_available():
+            def torch_sparse_gpu_with_transfer():
+                row_idx = torch.arange(N, dtype=torch.long, device='cuda')
+                t_gpu = t_cpu.cuda()
+                indices = torch.stack([row_idx, t_gpu])
+                values = torch.ones(N, dtype=torch.uint8, device='cuda')
+                out = torch.sparse_coo_tensor(indices, values, (N, K))
+                torch.cuda.synchronize()
+                return out
+
+            t, _ = bench("sparse COO manual GPU (with H2D)", torch_sparse_gpu_with_transfer)
 
     except ImportError:
         pass
