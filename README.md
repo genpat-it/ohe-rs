@@ -22,21 +22,21 @@ One-hot encoding is a fundamental operation in machine learning pipelines, yet e
 ## Benchmark Results
 
 All benchmarks on 10,000,000 rows, single machine (Linux, AMD EPYC, NVIDIA L4).
+Fair protocol: warm-up run excluded, GC disabled, 7 repeats (median), fit+transform end-to-end for all methods, uint8 output.
 
-### Sparse Encoding (recommended for most use cases)
+### Sparse Encoding (fit+transform, category discovery included)
 
 | Cardinality (K) | ohe-rs CPU | ohe-rs GPU | scikit-learn | Speedup vs sklearn |
 |---|---|---|---|---|
-| K = 10 | **25 ms** (394 M rows/s) | 50 ms | 412 ms | **16x** |
-| K = 1,000 | **29 ms** (342 M rows/s) | 58 ms | 772 ms | **26x** |
-| K = 100,000 | **60 ms** (166 M rows/s) | 91 ms | 1,383 ms | **23x** |
+| K = 10 | **31 ms** (326 M rows/s) | 54 ms | 475 ms | **15x** |
+| K = 1,000 | **28 ms** (357 M rows/s) | 65 ms | 825 ms | **29x** |
+| K = 100,000 | **58 ms** (172 M rows/s) | 84 ms | 1,338 ms | **23x** |
 
 ### Dense Encoding
 
 | Cardinality (K) | ohe-rs CPU | numpy eye | Speedup |
 |---|---|---|---|
-| K = 10 | **16 ms** (618 M rows/s) | 96 ms | **6x** |
-| K = 1,000 | **204 ms** (49 M rows/s) | 2,175 ms | **10x** |
+| K = 10 | **19 ms** (537 M rows/s) | 97 ms | **5x** |
 
 > **Note:** GPU sparse is ~2x slower than CPU due to host-device transfer overhead. GPU shines when data is already on the device or in end-to-end GPU pipelines.
 
