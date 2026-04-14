@@ -28,26 +28,46 @@ One-hot encoding is a fundamental operation in machine learning pipelines, yet e
 
 | Cardinality (K) | ohe-rs CPU | scikit-learn | Speedup |
 |---|---|---|---|
-| K = 10 | **29 ms** (348 M rows/s) | 406 ms | **14x** |
-| K = 1,000 | **29 ms** (345 M rows/s) | 842 ms | **29x** |
-| K = 100,000 | **68 ms** (147 M rows/s) | 1,453 ms | **21x** |
+| K = 10 | **26 ms** (387 M rows/s) | 381 ms | **15x** |
+| K = 1,000 | **21 ms** (468 M rows/s) | 740 ms | **35x** |
+| K = 100,000 | **56 ms** (179 M rows/s) | 1,310 ms | **23x** |
 
-### Transform-Only (K pre-known, input already 0..K-1, no discovery)
+### Transform-Only (K pre-known, no discovery) — full cartesian product
 
-| Method | K=10 | K=1,000 | K=100,000 | Notes |
-|---|---|---|---|---|
-| PyTorch sparse COO GPU (pre-loaded) | **1.6 ms** | **1.5 ms** | **1.6 ms** | Data + output on GPU, no transfer |
-| PyTorch sparse COO GPU (with H2D) | 10 ms | 11 ms | 11 ms | Includes host-to-device copy |
-| **ohe-rs CPU (num_classes=K)** | **25 ms** | **27 ms** | **30 ms** | **No GPU required** |
-| ohe-rs GPU (pre-loaded) | 28 ms | 26 ms | 27 ms | Includes D2H copy of results |
-| PyTorch sparse COO CPU | 34 ms | 35 ms | 33 ms | |
-| sklearn (prefitted) | 356 ms | 726 ms | 1,340 ms | |
+Every combination of H2D (host-to-device) and D2H (device-to-host) transfer benchmarked for both ohe-rs and PyTorch.
 
-> **ohe-rs CPU beats PyTorch sparse COO CPU** at all cardinalities (25-30ms vs 33-35ms) without requiring a GPU.
+**CPU:**
+
+| Method | K=10 | K=1,000 | K=100,000 |
+|---|---|---|---|
+| **ohe-rs CPU** | **18 ms** | **18 ms** | **21 ms** |
+| PyTorch sparse COO CPU | 29 ms | 29 ms | 28 ms |
+| sklearn (prefitted) | 400 ms | 698 ms | 1,337 ms |
+
+**GPU with H2D + D2H (data on host, result on host):**
+
+| Method | K=10 | K=1,000 | K=100,000 |
+|---|---|---|---|
+| **ohe-rs GPU** | **48 ms** | **44 ms** | **75 ms** |
+| PyTorch GPU | 75 ms | 73 ms | 73 ms |
+
+**GPU pre-loaded input, D2H output (kernel + D2H):**
+
+| Method | K=10 | K=1,000 | K=100,000 |
+|---|---|---|---|
+| **ohe-rs GPU** | **25 ms** | **25 ms** | **25 ms** |
+| PyTorch GPU | 66 ms | 65 ms | 64 ms |
+
+**GPU all on device — kernel only (no transfer):**
+
+| Method | K=10 | K=1,000 | K=100,000 |
+|---|---|---|---|
+| **ohe-rs GPU** | **1.3 ms** | **1.4 ms** | **1.4 ms** |
+| PyTorch GPU | 1.5 ms | 1.5 ms | 1.5 ms |
+
+> **ohe-rs wins every single category** — CPU, GPU with transfers, GPU pre-loaded, and GPU kernel-only.
 
 > **PyTorch `F.one_hot` limitation:** allocates a dense **int64** tensor (8 bytes/element) before casting. At K=1,000 with 10M rows this requires **80 GB of RAM**. ohe-rs sparse uses ~13 bytes/row regardless of K.
-
-> **GPU note:** PyTorch GPU pre-loaded (1.5ms) keeps output on device — no D2H cost. ohe-rs GPU pre-loaded (26ms) copies results back to CPU. For pure GPU pipelines, PyTorch wins; for CPU-accessible results, ohe-rs is competitive.
 
 ## Installation
 
