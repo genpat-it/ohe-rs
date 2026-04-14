@@ -156,6 +156,60 @@ for scenario_name, N, K in scenarios:
         )
         all_ok &= verify(m, "numpy eye")
 
+    # ── PyTorch ──────────────────────────────────────────────────────────
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        print(f"\n  --- PyTorch ---")
+
+        # CPU: torch.nn.functional.one_hot (returns dense int64 tensor)
+        t_cpu = torch.from_numpy(data_int)
+
+        # torch one_hot produces dense int64 (8 bytes per element!) then cast
+        # N*K*8 bytes for int64, skip if > 4GB to avoid system OOM
+        dense_torch_bytes = N * K * 8
+        if dense_torch_bytes <= 4 * 1024**3:
+            def torch_cpu_ohe():
+                return F.one_hot(t_cpu, num_classes=K).to(torch.uint8)
+
+            t, m = bench("F.one_hot CPU (K pre-known)", torch_cpu_ohe)
+            m_np = m.numpy()
+            all_ok &= verify(m_np, "torch CPU")
+        else:
+            print(f"  {'F.one_hot CPU':45s}  SKIPPED (would need {dense_torch_bytes/1e9:.0f} GB)")
+
+        # GPU: transfer + one_hot on device
+        if torch.cuda.is_available():
+            # N*K*8 for int64 on GPU, limit to ~2GB
+            if dense_torch_bytes <= 2 * 1024**3:
+                def torch_gpu_ohe_with_transfer():
+                    t_gpu = t_cpu.cuda()
+                    out = F.one_hot(t_gpu, num_classes=K).to(torch.uint8)
+                    torch.cuda.synchronize()
+                    return out
+
+                t, _ = bench("F.one_hot GPU (with H2D transfer)", torch_gpu_ohe_with_transfer)
+
+                t_gpu_preloaded = t_cpu.cuda()
+                torch.cuda.synchronize()
+
+                def torch_gpu_ohe_preloaded():
+                    out = F.one_hot(t_gpu_preloaded, num_classes=K).to(torch.uint8)
+                    torch.cuda.synchronize()
+                    return out
+
+                t, _ = bench("F.one_hot GPU (data pre-loaded)", torch_gpu_ohe_preloaded)
+
+                # Cleanup GPU memory
+                del t_gpu_preloaded
+                torch.cuda.empty_cache()
+            else:
+                print(f"  {'F.one_hot GPU':45s}  SKIPPED (would need {dense_torch_bytes/1e9:.0f} GB on device)")
+
+    except ImportError:
+        pass
+
     # ── polars ───────────────────────────────────────────────────────────
     try:
         import polars as pl
