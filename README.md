@@ -69,6 +69,25 @@ Every combination of H2D (host-to-device) and D2H (device-to-host) transfer benc
 
 > **PyTorch `F.one_hot` limitation:** allocates a dense **int64** tensor (8 bytes/element) before casting. At K=1,000 with 10M rows this requires **80 GB of RAM**. ohe-rs sparse uses ~13 bytes/row regardless of K.
 
+### Thread Scaling
+
+One-hot encoding is **memory-bandwidth bound**, not compute-bound. More threads help only up to the point where RAM bandwidth saturates. On our 80-core machine, the sweet spot is **8-16 threads**:
+
+| Threads | E2E K=10 | E2E K=100K | Transform K=10 |
+|---|---|---|---|
+| 1 | 58 ms | 273 ms | 24 ms |
+| 8 | **20 ms** | 70 ms | **16 ms** |
+| 16 | 20 ms | **62 ms** | 16 ms |
+| 32 | 20 ms | 55 ms | 20 ms |
+| 80 | 28 ms | 64 ms | 29 ms |
+
+Beyond 16 threads, performance **degrades** due to cache contention. On typical workstations (4-8 cores), all cores are useful. Use `set_threads()` to tune:
+
+```python
+from ohe_rs import set_threads
+set_threads(8)  # recommended for machines with >16 cores
+```
+
 ## Installation
 
 ### From source (recommended)
