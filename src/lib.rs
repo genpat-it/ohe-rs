@@ -525,6 +525,19 @@ fn gpu_encode_sparse_preloaded_py<'py>(
     ))
 }
 
+/// Kernel-only: input pre-loaded, output stays on GPU. No D2H copy.
+/// For benchmarking raw kernel time.
+#[cfg(feature = "cuda")]
+#[pyfunction]
+fn gpu_encode_sparse_kernel_only_py(buffer: &GpuBufferPy) -> PyResult<()> {
+    let encoder = get_gpu_encoder()
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e))?;
+    encoder
+        .encode_sparse_kernel_only(&buffer.inner)
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("CUDA kernel: {e}")))?;
+    Ok(())
+}
+
 #[cfg(feature = "cuda")]
 #[pyfunction]
 fn gpu_available() -> bool {
@@ -552,6 +565,7 @@ fn ohe_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(gpu_encode_sparse_py, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_upload, m)?)?;
         m.add_function(wrap_pyfunction!(gpu_encode_sparse_preloaded_py, m)?)?;
+        m.add_function(wrap_pyfunction!(gpu_encode_sparse_kernel_only_py, m)?)?;
         m.add_class::<GpuBufferPy>()?;
     }
 

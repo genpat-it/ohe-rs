@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Fair benchmark: ohe-rs vs state-of-the-art one-hot encoding.
 
-Fairness protocol:
-  - All implementations use uint8 output dtype
-  - GC disabled during timing
-  - Warm-up run excluded from measurements
-  - Two sections: END-TO-END (with discovery) and TRANSFORM-ONLY (K pre-known)
-  - Same input data, same random seed
-  - 7 repeats, report median (robust to outliers)
-  - Correctness verified: every row sums to 1, nnz == N
+Cartesian product of all dimensions:
+  - Category discovery: YES / NO (num_classes pre-known)
+  - H2D transfer: YES / NO (data pre-loaded on GPU)
+  - D2H transfer: YES / NO (output stays on GPU)
+  - Device: CPU / GPU
+
+Fair protocol: warm-up excluded, GC disabled, 7 repeats (median), uint8.
 """
 
 import gc
 import time
 import platform
 import subprocess
+import os
 import numpy as np
 from scipy.sparse import csr_matrix
 
@@ -22,7 +22,6 @@ REPEATS = 7
 SEED = 42
 
 def bench(name, fn, n_rows, repeats=REPEATS):
-    """Warm-up + timed repeats with GC disabled. Returns median time and last result."""
     result = fn()
     gc.disable()
     times = []
@@ -35,7 +34,7 @@ def bench(name, fn, n_rows, repeats=REPEATS):
     gc.enable()
     median = sorted(times)[len(times) // 2]
     rate = n_rows / median / 1e6
-    print(f"  {name:50s}  {median*1000:8.1f} ms  ({rate:7.1f} M rows/s)")
+    print(f"    {name:55s} {median*1000:8.1f} ms  ({rate:7.1f} M rows/s)")
     return median, result
 
 def verify(matrix, label):
@@ -43,11 +42,11 @@ def verify(matrix, label):
         matrix = csr_matrix(matrix)
     ok = True
     if matrix.nnz != matrix.shape[0]:
-        print(f"    FAIL {label}: nnz={matrix.nnz} != N={matrix.shape[0]}")
+        print(f"      FAIL {label}: nnz={matrix.nnz} != N={matrix.shape[0]}")
         ok = False
     row_sums = np.array(matrix.sum(axis=1)).flatten()
     if not np.all(row_sums == 1):
-        print(f"    FAIL {label}: {np.sum(row_sums != 1)} rows don't sum to 1")
+        print(f"      FAIL {label}: {np.sum(row_sums != 1)} rows don't sum to 1")
         ok = False
     return ok
 
@@ -59,7 +58,7 @@ def print_system_info():
             if line.startswith("Model name:"):
                 print(f"  CPU:       {line.split(':',1)[1].strip()}")
             if line.startswith("CPU(s):"):
-                print(f"  CPU cores: {line.split(':',1)[1].strip()}")
+                print(f"  Cores:     {line.split(':',1)[1].strip()}")
     except Exception:
         pass
     try:
@@ -75,13 +74,8 @@ def print_system_info():
         print(f"  GPU:       {gpu}")
     except Exception:
         print(f"  GPU:       not available")
-    print(f"  Python:    {platform.python_version()}")
-    print(f"  NumPy:     {np.__version__}")
-    import os
-    rayon_threads = os.cpu_count()
-    print(f"  Rayon:     {rayon_threads} threads (all available cores)")
-
-# ── Config ────────────────────────────────────────────────────────────
+    print(f"  Python:    {platform.python_version()}, NumPy: {np.__version__}")
+    print(f"  Threads:   {os.cpu_count()} (rayon uses all by default)")
 
 scenarios = [
     ("Low cardinality",   10_000_000,      10),
@@ -89,104 +83,72 @@ scenarios = [
     ("High cardinality",  10_000_000, 100_000),
 ]
 
-print("=" * 85)
-print("  FAIR BENCHMARK: one-hot encoding")
-print(f"  Repeats: {REPEATS}, metric: median, warm-up: 1 run excluded")
-print(f"  Output dtype: uint8, GC disabled during timing")
+print("=" * 90)
+print("  FAIR BENCHMARK — one-hot encoding (sparse CSR/COO)")
+print(f"  Protocol: {REPEATS} repeats, median, warm-up excluded, GC off, uint8")
 print()
 print_system_info()
-print("=" * 85)
+print("=" * 90)
 
 for scenario_name, N, K in scenarios:
     rng = np.random.default_rng(SEED)
     data_int = rng.integers(0, K, size=N, dtype=np.int64)
     data_2d = data_int.reshape(-1, 1)
 
-    print(f"\n{'━'*85}")
+    print(f"\n{'━'*90}")
     print(f"  {scenario_name}: N={N:,}, K={K:,}")
-    print(f"{'━'*85}")
+    print(f"{'━'*90}")
 
     all_ok = True
 
-    # ══════════════════════════════════════════════════════════════════
-    # SECTION 1: END-TO-END (category discovery + encoding)
-    # ══════════════════════════════════════════════════════════════════
-    print(f"\n  ┌─ END-TO-END (input → encoded matrix, category discovery included)")
-    print(f"  │")
+    # ==================================================================
+    # A) END-TO-END: raw data → usable result (discovery + encoding)
+    # ==================================================================
+    print(f"\n  A) END-TO-END (discovery=YES)")
+    print(f"  ─────────────────────────────")
 
-    # ohe-rs
-    from ohe_rs import encode_sparse, encode_dense
+    from ohe_rs import encode_sparse
+
     t, (v, idx, ptr, nc) = bench(
-        "│  ohe-rs sparse", lambda: encode_sparse(data_int), N,
-    )
-    all_ok &= verify(csr_matrix((v, idx, ptr), shape=(N, nc)), "ohe-rs e2e sparse")
+        "ohe-rs CPU  [discovery + encode]",
+        lambda: encode_sparse(data_int), N)
+    all_ok &= verify(csr_matrix((v, idx, ptr), shape=(N, nc)), "ohe-rs e2e")
 
-    # sklearn
     try:
         from sklearn.preprocessing import OneHotEncoder
-        def sklearn_fit_transform():
+        def sklearn_e2e():
             enc = OneHotEncoder(sparse_output=True, dtype=np.uint8)
             return enc.fit_transform(data_2d)
-        t, m = bench("│  sklearn fit_transform", sklearn_fit_transform, N)
+        t, m = bench("sklearn      [fit_transform]", sklearn_e2e, N)
         all_ok &= verify(m, "sklearn e2e")
     except ImportError:
         pass
 
-    print(f"  │")
-    print(f"  └─")
+    # ==================================================================
+    # B) TRANSFORM-ONLY: K known, input=0..K-1, no discovery
+    # ==================================================================
+    print(f"\n  B) TRANSFORM-ONLY (discovery=NO, K={K:,})")
+    print(f"  ──────────────────────────────────────────")
 
-    # ══════════════════════════════════════════════════════════════════
-    # SECTION 2: TRANSFORM-ONLY (K known, input already 0..K-1)
-    # Apple-to-apple comparison: no category discovery for anyone
-    # ══════════════════════════════════════════════════════════════════
-    print(f"\n  ┌─ TRANSFORM-ONLY (K pre-known, input already 0..K-1, no discovery)")
-    print(f"  │")
+    # --- CPU ---
+    print(f"    ── CPU ──")
 
-    # ohe-rs CPU with num_classes (skip discovery)
     t, (v, idx, ptr, nc) = bench(
-        "│  ohe-rs CPU sparse (num_classes=K)",
-        lambda: encode_sparse(data_int, num_classes=K), N,
-    )
-    all_ok &= verify(csr_matrix((v, idx, ptr), shape=(N, nc)), "ohe-rs transform sparse")
+        "ohe-rs CPU  [encode only]",
+        lambda: encode_sparse(data_int, num_classes=K), N)
+    all_ok &= verify(csr_matrix((v, idx, ptr), shape=(N, nc)), "ohe-rs cpu transform")
 
-    # ohe-rs GPU (with H2D transfer, no discovery)
-    try:
-        from ohe_rs import gpu_available
-        if gpu_available():
-            from ohe_rs import gpu_encode_sparse, gpu_upload, gpu_encode_sparse_preloaded
-
-            t, (v, idx, ptr, nc) = bench(
-                "│  ohe-rs GPU sparse (with H2D, num_classes=K)",
-                lambda: gpu_encode_sparse(data_int), N,
-            )
-
-            # Pre-load data on GPU
-            gpu_buf = gpu_upload(data_int)
-
-            t, (v, idx, ptr, nc) = bench(
-                "│  ohe-rs GPU sparse (pre-loaded)",
-                lambda: gpu_encode_sparse_preloaded(gpu_buf, K), N,
-            )
-
-            del gpu_buf
-    except ImportError:
-        pass
-
-    # sklearn transform-only (prefitted)
     try:
         from sklearn.preprocessing import OneHotEncoder
         enc_pre = OneHotEncoder(sparse_output=True, dtype=np.uint8)
         enc_pre.fit(data_2d)
-        t, m = bench("│  sklearn transform (prefitted)", lambda: enc_pre.transform(data_2d), N)
+        t, m = bench("sklearn      [transform, prefitted]", lambda: enc_pre.transform(data_2d), N)
         all_ok &= verify(m, "sklearn transform")
     except ImportError:
         pass
 
-    # PyTorch sparse COO (manual construction)
     try:
         import torch
-        import torch.nn.functional as F
-
         t_cpu = torch.from_numpy(data_int)
 
         def torch_sparse_coo_cpu():
@@ -194,60 +156,91 @@ for scenario_name, N, K in scenarios:
             indices = torch.stack([row_idx, t_cpu])
             values = torch.ones(N, dtype=torch.uint8)
             return torch.sparse_coo_tensor(indices, values, (N, K))
+        t, _ = bench("PyTorch      [sparse COO construct]", torch_sparse_coo_cpu, N)
+    except ImportError:
+        torch = None
 
-        t, _ = bench("│  PyTorch sparse COO CPU", torch_sparse_coo_cpu, N)
+    # --- GPU: with H2D, with D2H ---
+    print(f"    ── GPU (H2D=YES, D2H=YES) ──")
 
-        # PyTorch F.one_hot (dense, K pre-known)
-        dense_bytes = N * K * 8
-        if dense_bytes <= 4 * 1024**3:
-            def torch_onehot_cpu():
-                return F.one_hot(t_cpu, num_classes=K).to(torch.uint8)
-            t, m = bench("│  PyTorch F.one_hot CPU (dense)", torch_onehot_cpu, N)
-            all_ok &= verify(m.numpy(), "torch F.one_hot CPU")
-
-        if torch.cuda.is_available():
-            # GPU sparse COO with H2D transfer
-            def torch_sparse_coo_gpu():
-                t_gpu = t_cpu.cuda()
-                row_idx = torch.arange(N, dtype=torch.long, device='cuda')
-                indices = torch.stack([row_idx, t_gpu])
-                values = torch.ones(N, dtype=torch.uint8, device='cuda')
-                out = torch.sparse_coo_tensor(indices, values, (N, K))
-                torch.cuda.synchronize()
-                return out
-            t, _ = bench("│  PyTorch sparse COO GPU (with H2D)", torch_sparse_coo_gpu, N)
-
-            # GPU sparse COO, data pre-loaded
-            t_gpu_pre = t_cpu.cuda()
-            row_idx_pre = torch.arange(N, dtype=torch.long, device='cuda')
-            vals_pre = torch.ones(N, dtype=torch.uint8, device='cuda')
-            torch.cuda.synchronize()
-
-            def torch_sparse_coo_gpu_preloaded():
-                indices = torch.stack([row_idx_pre, t_gpu_pre])
-                out = torch.sparse_coo_tensor(indices, vals_pre, (N, K))
-                torch.cuda.synchronize()
-                return out
-            t, _ = bench("│  PyTorch sparse COO GPU (pre-loaded)", torch_sparse_coo_gpu_preloaded, N)
-
-            del t_gpu_pre, row_idx_pre, vals_pre
-            torch.cuda.empty_cache()
-
+    try:
+        from ohe_rs import gpu_available
+        if gpu_available():
+            from ohe_rs import gpu_encode_sparse
+            t, (v, idx, ptr, nc) = bench(
+                "ohe-rs GPU   [H2D + kernel + D2H]",
+                lambda: gpu_encode_sparse(data_int), N)
     except ImportError:
         pass
 
-    # numpy eye (K pre-known)
-    if K <= 100:
-        t, m = bench("│  numpy eye indexing", lambda: np.eye(K, dtype=np.uint8)[data_int], N)
-        all_ok &= verify(m, "numpy eye")
+    if torch and torch.cuda.is_available():
+        def torch_gpu_h2d_d2h():
+            t_gpu = t_cpu.cuda()
+            row_idx = torch.arange(N, dtype=torch.long, device='cuda')
+            idx_t = torch.stack([row_idx, t_gpu])
+            vals = torch.ones(N, dtype=torch.uint8, device='cuda')
+            out = torch.sparse_coo_tensor(idx_t, vals, (N, K))
+            # D2H: coalesce + move to CPU to materialize result
+            out_cpu = out.coalesce().to('cpu')
+            torch.cuda.synchronize()
+            return out_cpu
+        t, _ = bench("PyTorch GPU  [H2D + construct + D2H]", torch_gpu_h2d_d2h, N)
 
-    print(f"  │")
-    print(f"  └─")
+    # --- GPU: pre-loaded input, with D2H ---
+    print(f"    ── GPU (H2D=NO, D2H=YES) — input pre-loaded ──")
 
-    # ── Correctness ──────────────────────────────────────────────────
+    try:
+        if gpu_available():
+            from ohe_rs import gpu_upload, gpu_encode_sparse_preloaded
+            gpu_buf = gpu_upload(data_int)
+            t, (v, idx, ptr, nc) = bench(
+                "ohe-rs GPU   [kernel + D2H]",
+                lambda: gpu_encode_sparse_preloaded(gpu_buf, K), N)
+    except ImportError:
+        pass
+
+    if torch and torch.cuda.is_available():
+        t_gpu_pre = t_cpu.cuda()
+        row_pre = torch.arange(N, dtype=torch.long, device='cuda')
+        vals_pre = torch.ones(N, dtype=torch.uint8, device='cuda')
+        torch.cuda.synchronize()
+
+        def torch_gpu_preloaded_d2h():
+            idx_t = torch.stack([row_pre, t_gpu_pre])
+            out = torch.sparse_coo_tensor(idx_t, vals_pre, (N, K))
+            out_cpu = out.coalesce().to('cpu')
+            torch.cuda.synchronize()
+            return out_cpu
+        t, _ = bench("PyTorch GPU  [construct + D2H]", torch_gpu_preloaded_d2h, N)
+
+    # --- GPU: pre-loaded input, output stays on GPU ---
+    print(f"    ── GPU (H2D=NO, D2H=NO) — all on device ──")
+
+    try:
+        if gpu_available():
+            from ohe_rs.ohe_rs import gpu_encode_sparse_kernel_only_py
+            t, _ = bench(
+                "ohe-rs GPU   [kernel only, output on GPU]",
+                lambda: gpu_encode_sparse_kernel_only_py(gpu_buf), N)
+            del gpu_buf
+    except ImportError:
+        pass
+
+    if torch and torch.cuda.is_available():
+        def torch_gpu_all_on_device():
+            idx_t = torch.stack([row_pre, t_gpu_pre])
+            out = torch.sparse_coo_tensor(idx_t, vals_pre, (N, K))
+            torch.cuda.synchronize()
+            return out
+        t, _ = bench("PyTorch GPU  [construct only, on device]", torch_gpu_all_on_device, N)
+
+        del t_gpu_pre, row_pre, vals_pre
+        torch.cuda.empty_cache()
+
+    # ── Correctness ──
     status = "ALL PASS" if all_ok else "FAILURES DETECTED"
     print(f"\n  Correctness: {status}")
 
-print(f"\n{'='*85}")
+print(f"\n{'='*90}")
 print(f"  Benchmark complete.")
-print(f"{'='*85}\n")
+print(f"{'='*90}\n")

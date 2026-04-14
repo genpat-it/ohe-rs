@@ -125,6 +125,40 @@ impl GpuEncoder {
         Ok(output)
     }
 
+    /// Kernel-only sparse encode: input pre-loaded, output stays on GPU.
+    /// Returns nothing — just runs the kernel. For benchmarking kernel time.
+    pub fn encode_sparse_kernel_only(
+        &self,
+        buf: &GpuBuffer,
+    ) -> Result<(), DriverError> {
+        let n = buf.n as i64;
+        let stream = self.ctx.default_stream();
+
+        let d_indices = stream.alloc_zeros::<i32>(buf.n)?;
+        let d_indptr = stream.alloc_zeros::<i64>(buf.n + 1)?;
+
+        let f_indices = self.module.load_function("ohe_sparse_indices").unwrap();
+        let f_indptr = self.module.load_function("ohe_sparse_indptr").unwrap();
+
+        let cfg_n = LaunchConfig::for_num_elems(buf.n as u32);
+        let cfg_np1 = LaunchConfig::for_num_elems((buf.n + 1) as u32);
+
+        let mut launch_idx = stream.launch_builder(&f_indices);
+        launch_idx.arg(&buf.data);
+        launch_idx.arg(&d_indices);
+        launch_idx.arg(&n);
+        unsafe { launch_idx.launch(cfg_n) }?;
+
+        let mut launch_ptr = stream.launch_builder(&f_indptr);
+        launch_ptr.arg(&d_indptr);
+        launch_ptr.arg(&n);
+        unsafe { launch_ptr.launch(cfg_np1) }?;
+
+        stream.synchronize()?;
+        // output stays on GPU, dropped when d_indices/d_indptr go out of scope
+        Ok(())
+    }
+
     pub fn encode_sparse_indices(
         &self,
         codes: &[i64],
