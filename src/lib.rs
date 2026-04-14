@@ -280,6 +280,209 @@ fn encode_multi_column_sparse(
     (values, indices, indptr, col_sizes)
 }
 
+/// Transform using pre-built category maps (skip discovery).
+fn encode_multi_column_sparse_with_maps(
+    matrix: &[i64],
+    n_rows: usize,
+    n_cols: usize,
+    col_maps: &[CategoryMap],
+    offsets: &[usize],
+    total_k: usize,
+) -> (Vec<u8>, Vec<i32>, Vec<i64>) {
+    let nnz = n_rows * n_cols;
+
+    let indptr: Vec<i64> = (0..=n_rows)
+        .map(|i| (i * n_cols) as i64)
+        .collect();
+
+    let values = vec![1u8; nnz];
+
+    let indices: Vec<i32> = (0..n_rows)
+        .into_par_iter()
+        .flat_map_iter(|row| {
+            (0..n_cols).map(move |c| {
+                let val = matrix[row * n_cols + c];
+                let code = col_maps[c].get(&val).unwrap_or(0);
+                (offsets[c] + code as usize) as i32
+            })
+        })
+        .collect();
+
+    (values, indices, indptr)
+}
+
+// ── MultiEncoder (Python class with cached category maps) ───────────
+
+/// Cached multi-column encoder. Fit once, transform many times.
+#[pyclass]
+struct MultiEncoder {
+    col_maps: Vec<CategoryMap>,
+    offsets: Vec<usize>,
+    col_sizes: Vec<usize>,
+    total_k: usize,
+    n_cols: usize,
+}
+
+#[pymethods]
+impl MultiEncoder {
+    /// Fit: discover categories from a reference matrix (N × C).
+    #[staticmethod]
+    fn fit(input: PyReadonlyArray2<'_, i64>) -> PyResult<Self> {
+        let array = input.as_array();
+        let n_rows = array.nrows();
+        let n_cols = array.ncols();
+
+        let contiguous: Vec<i64> = if let Some(slice) = array.as_slice() {
+            slice.to_vec()
+        } else {
+            array.iter().copied().collect()
+        };
+
+        let col_maps: Vec<CategoryMap> = (0..n_cols)
+            .into_par_iter()
+            .map(|c| {
+                let mut cm = CategoryMap::new();
+                for r in 0..n_rows {
+                    cm.insert(contiguous[r * n_cols + c]);
+                }
+                cm
+            })
+            .collect();
+
+        let mut offsets = Vec::with_capacity(n_cols);
+        let mut total_k = 0usize;
+        let col_sizes: Vec<usize> = col_maps.iter().map(|cm| {
+            offsets.push(total_k);
+            let k = cm.len();
+            total_k += k;
+            k
+        }).collect();
+
+        Ok(Self { col_maps, offsets, col_sizes, total_k, n_cols })
+    }
+
+    /// Transform: encode using cached category maps (no discovery).
+    fn transform<'py>(
+        &self,
+        py: Python<'py>,
+        input: PyReadonlyArray2<'py, i64>,
+    ) -> PyResult<(
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i64>>,
+        usize,
+        Vec<usize>,
+    )> {
+        let array = input.as_array();
+        let n_rows = array.nrows();
+        let n_cols = array.ncols();
+
+        if n_cols != self.n_cols {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Expected {} columns, got {}", self.n_cols, n_cols
+            )));
+        }
+
+        let contiguous: Vec<i64> = if let Some(slice) = array.as_slice() {
+            slice.to_vec()
+        } else {
+            array.iter().copied().collect()
+        };
+
+        let (values, indices, indptr) = encode_multi_column_sparse_with_maps(
+            &contiguous, n_rows, n_cols,
+            &self.col_maps, &self.offsets, self.total_k,
+        );
+
+        Ok((
+            Array1::from_vec(values).into_pyarray_bound(py),
+            Array1::from_vec(indices).into_pyarray_bound(py),
+            Array1::from_vec(indptr).into_pyarray_bound(py),
+            self.total_k,
+            self.col_sizes.clone(),
+        ))
+    }
+
+    /// Fit + transform in one call.
+    #[staticmethod]
+    fn fit_transform<'py>(
+        py: Python<'py>,
+        input: PyReadonlyArray2<'py, i64>,
+    ) -> PyResult<(
+        MultiEncoder,
+        Bound<'py, PyArray1<u8>>,
+        Bound<'py, PyArray1<i32>>,
+        Bound<'py, PyArray1<i64>>,
+        usize,
+        Vec<usize>,
+    )> {
+        let array = input.as_array();
+        let n_rows = array.nrows();
+        let n_cols = array.ncols();
+
+        let contiguous: Vec<i64> = if let Some(slice) = array.as_slice() {
+            slice.to_vec()
+        } else {
+            array.iter().copied().collect()
+        };
+
+        // Fit
+        let col_maps: Vec<CategoryMap> = (0..n_cols)
+            .into_par_iter()
+            .map(|c| {
+                let mut cm = CategoryMap::new();
+                for r in 0..n_rows {
+                    cm.insert(contiguous[r * n_cols + c]);
+                }
+                cm
+            })
+            .collect();
+
+        let mut offsets = Vec::with_capacity(n_cols);
+        let mut total_k = 0usize;
+        let col_sizes: Vec<usize> = col_maps.iter().map(|cm| {
+            offsets.push(total_k);
+            let k = cm.len();
+            total_k += k;
+            k
+        }).collect();
+
+        // Transform (reuse contiguous data)
+        let (values, indices, indptr) = encode_multi_column_sparse_with_maps(
+            &contiguous, n_rows, n_cols, &col_maps, &offsets, total_k,
+        );
+
+        let encoder = MultiEncoder { col_maps, offsets, col_sizes: col_sizes.clone(), total_k, n_cols };
+
+        Ok((
+            encoder,
+            Array1::from_vec(values).into_pyarray_bound(py),
+            Array1::from_vec(indices).into_pyarray_bound(py),
+            Array1::from_vec(indptr).into_pyarray_bound(py),
+            total_k,
+            col_sizes,
+        ))
+    }
+
+    /// Number of output columns (total one-hot width).
+    #[getter]
+    fn total_columns(&self) -> usize {
+        self.total_k
+    }
+
+    /// Number of input columns (loci).
+    #[getter]
+    fn n_loci(&self) -> usize {
+        self.n_cols
+    }
+
+    /// Categories per column.
+    #[getter]
+    fn categories_per_column(&self) -> Vec<usize> {
+        self.col_sizes.clone()
+    }
+}
+
 // ── Public API for benchmarks ────────────────────────────────────────
 
 pub fn discover_categories_parallel_pub(data: &[i64]) -> usize {
@@ -658,6 +861,7 @@ fn ohe_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_dense_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_strings_sparse_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_multi_sparse_py, m)?)?;
+    m.add_class::<MultiEncoder>()?;
     m.add_function(wrap_pyfunction!(estimate_memory_py, m)?)?;
     m.add_function(wrap_pyfunction!(set_threads, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;

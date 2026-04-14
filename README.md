@@ -217,6 +217,35 @@ matrix = csr_matrix((values, indices, indptr), shape=(10_000, total_cols))
 
 Sparse uses **1.8%** of the memory that dense would require. The output matrix has shape (10,000 x 2,178,687) with 80M non-zeros — each row has exactly 8,000 ones (one per locus).
 
+### Cached encoder (fit once, transform many)
+
+For repeated encoding against the same schema (e.g. new samples arriving daily):
+
+```python
+from ohe_rs import MultiEncoder
+
+# Fit once on reference dataset (builds category maps)
+encoder = MultiEncoder.fit(reference_profiles)  # 251 ms
+
+# Transform new samples instantly (skip discovery)
+result = encoder.transform(new_profiles)  # 27 ms for 500 samples
+
+# Or fit + transform in one call
+encoder, values, indices, indptr, total_k, col_sizes = MultiEncoder.fit_transform(profiles)
+
+# Inspect
+print(encoder.n_loci)                # 8000
+print(encoder.total_columns)         # 2,178,687
+print(encoder.categories_per_column) # [124, 89, 201, ...]
+```
+
+| Operation | Time |
+|---|---|
+| `fit` (10K reference, one-time) | 251 ms |
+| `transform` (500 new samples) | **27 ms** |
+| `transform` (10K samples) | 465 ms |
+| `encode_multi_sparse` (no cache) | 665 ms |
+
 ### Memory estimation
 
 ```python
