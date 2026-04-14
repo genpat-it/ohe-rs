@@ -1,5 +1,5 @@
-use numpy::ndarray::{Array1, Array2};
-use numpy::{IntoPyArray as _, PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::ndarray::{Array1, Array2, Axis};
+use numpy::{IntoPyArray as _, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
@@ -218,6 +218,68 @@ fn encode_dense_chunked(
     matrix
 }
 
+// ── Multi-column encoding ────────────────────────────────────────────
+
+/// One-hot encode multiple columns (e.g. cgMLST loci) in a single pass.
+/// Input: N×C matrix (rows=samples, cols=loci).
+/// Each column is encoded independently, then concatenated horizontally.
+///
+/// Returns CSR components for the (N × total_K) matrix where
+/// total_K = sum of unique categories per column.
+/// Each row has exactly C non-zeros (one per input column).
+fn encode_multi_column_sparse(
+    matrix: &[i64],   // row-major N×C
+    n_rows: usize,
+    n_cols: usize,
+) -> (Vec<u8>, Vec<i32>, Vec<i64>, Vec<usize>) {
+    // Phase 1: per-column category discovery (parallel across columns)
+    let col_maps: Vec<CategoryMap> = (0..n_cols)
+        .into_par_iter()
+        .map(|c| {
+            let mut cm = CategoryMap::new();
+            for r in 0..n_rows {
+                cm.insert(matrix[r * n_cols + c]);
+            }
+            cm
+        })
+        .collect();
+
+    // Compute column offsets in the output matrix
+    let mut offsets = Vec::with_capacity(n_cols);
+    let mut total_k = 0usize;
+    let col_sizes: Vec<usize> = col_maps.iter().map(|cm| {
+        offsets.push(total_k);
+        let k = cm.len();
+        total_k += k;
+        k
+    }).collect();
+
+    let nnz = n_rows * n_cols;
+
+    // indptr: each row has exactly n_cols non-zeros
+    let indptr: Vec<i64> = (0..=n_rows)
+        .map(|i| (i * n_cols) as i64)
+        .collect();
+
+    let values = vec![1u8; nnz];
+
+    // Phase 2: build indices (parallel across rows)
+    let col_maps_ref = &col_maps;
+    let offsets_ref = &offsets;
+    let indices: Vec<i32> = (0..n_rows)
+        .into_par_iter()
+        .flat_map_iter(|row| {
+            (0..n_cols).map(move |c| {
+                let val = matrix[row * n_cols + c];
+                let code = col_maps_ref[c].get(&val).unwrap();
+                (offsets_ref[c] + code as usize) as i32
+            })
+        })
+        .collect();
+
+    (values, indices, indptr, col_sizes)
+}
+
 // ── Public API for benchmarks ────────────────────────────────────────
 
 pub fn discover_categories_parallel_pub(data: &[i64]) -> usize {
@@ -384,6 +446,46 @@ fn encode_strings_sparse_py<'py>(
         Array1::from_vec(indptr).into_pyarray_bound(py),
         categories,
         n_cats,
+    ))
+}
+
+/// One-hot encode a multi-column matrix (e.g. cgMLST allele profiles).
+/// Input: 2D array of shape (N_samples, N_loci), dtype int64.
+/// Each column is encoded independently, concatenated horizontally.
+/// Returns (data, indices, indptr, total_columns, per_column_sizes).
+#[pyfunction]
+fn encode_multi_sparse_py<'py>(
+    py: Python<'py>,
+    input: PyReadonlyArray2<'py, i64>,
+) -> PyResult<(
+    Bound<'py, PyArray1<u8>>,
+    Bound<'py, PyArray1<i32>>,
+    Bound<'py, PyArray1<i64>>,
+    usize,
+    Vec<usize>,
+)> {
+    let array = input.as_array();
+    let n_rows = array.nrows();
+    let n_cols = array.ncols();
+
+    // Make contiguous row-major copy
+    let contiguous: Vec<i64> = if let Some(slice) = array.as_slice() {
+        slice.to_vec()
+    } else {
+        array.iter().copied().collect()
+    };
+
+    let (values, indices, indptr, col_sizes) =
+        encode_multi_column_sparse(&contiguous, n_rows, n_cols);
+
+    let total_k: usize = col_sizes.iter().sum();
+
+    Ok((
+        Array1::from_vec(values).into_pyarray_bound(py),
+        Array1::from_vec(indices).into_pyarray_bound(py),
+        Array1::from_vec(indptr).into_pyarray_bound(py),
+        total_k,
+        col_sizes,
     ))
 }
 
@@ -555,6 +657,7 @@ fn ohe_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(encode_sparse_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_dense_py, m)?)?;
     m.add_function(wrap_pyfunction!(encode_strings_sparse_py, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_multi_sparse_py, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_memory_py, m)?)?;
     m.add_function(wrap_pyfunction!(set_threads, m)?)?;
     m.add_function(wrap_pyfunction!(gpu_available, m)?)?;
