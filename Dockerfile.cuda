@@ -10,7 +10,7 @@ COPY Cargo.toml Cargo.lock build.rs pyproject.toml ./
 COPY src/ src/
 COPY python/ python/
 
-RUN CUDA_ROOT=/usr/local/cuda maturin build --release --out /wheels
+RUN CUDA_ROOT=/usr/local/cuda maturin build --release --features cuda --out /wheels
 
 FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04
 

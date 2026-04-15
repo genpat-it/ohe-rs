@@ -107,7 +107,7 @@ pip install maturin
 maturin develop --release
 
 # With CUDA support (requires CUDA toolkit)
-CUDA_ROOT=/usr/local/cuda maturin develop --release
+CUDA_ROOT=/usr/local/cuda maturin develop --release --features cuda
 ```
 
 ### Docker (ghcr.io)
