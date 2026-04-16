@@ -127,9 +127,10 @@ Images are automatically built and pushed on each release.
 ### Bioconda
 
 ```bash
-# Coming soon
 conda install -c bioconda ohe-rs
 ```
+
+Available for Python 3.10, 3.11, 3.12, 3.13 on linux-64 and linux-aarch64.
 
 ### Build requirements
 
